@@ -5,10 +5,8 @@ import cv2
 from config import cfg
 from input.webcam_reader import WebcamReader
 from input.video_reader import VideoReader
-from detection.lip_extractor import LipExtractor
-from features.lip_ratio import lip_aspect_ratio
+from features.lip_ratio import LipExtractor
 from features.frame_diff import frame_difference
-from features.motion_flow import optical_flow_feature
 from classification.rule_based import RuleBasedClassifier
 from classification.ml_model import MLClassifier
 from visualization.overlay import Overlay
@@ -21,6 +19,7 @@ GREEN = "\033[32m"
 YELLOW = "\033[33m"
 BLUE = "\033[34m"
 RESET = "\033[0m" 
+
 
 def parse_args():
     """
@@ -77,24 +76,28 @@ def main():
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         det = extractor.extract(frame)
         lip_pts_np = det['lip_points'] if det else None
-
-        ratio = lip_aspect_ratio(lip_pts_np) if lip_pts_np is not None else 0.0
-        diff_val = frame_difference(prev_gray, gray)
-        flow_mag, cur_pts = optical_flow_feature(prev_gray, gray, prev_lip_pts)
-
+        ratio = det['lip_ratio'] if det else 0.0
+        
+        diff_val = frame_difference(prev_gray, gray, lip_pts_np)
+        
         if args.use_ml and ml_cls is not None:
             print(f"{YELLOW}ML 모델 예측 중...{RESET}", end='\r') 
 
-            feat = [ratio or 0.0, flow_mag or 0.0, diff_val]
+            feat = [ratio or 0.0, diff_val]
             speaking = ml_cls.predict(feat)
         else:
-            speaking = rule_cls.predict(ratio or 0.0, flow_mag, diff_val)
+            speaking = rule_cls.predict(ratio or 0.0, diff_val)
 
-        Overlay.draw(frame, lip_pts_np if lip_pts_np is not None else [], ratio or 0.0, flow_mag or 0.0, diff_val, speaking)
+        Overlay.draw(frame, lip_pts_np if lip_pts_np is not None else [], ratio or 0.0, diff_val, speaking)
 
-        cv2.imshow('Prototype', frame)
+        # 창 설정 (고정 크기)
+        cv2.namedWindow(cfg.window_name, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow(cfg.window_name, cfg.window_width, cfg.window_height)
+
+        cv2.imshow(cfg.window_name, frame)
+
         prev_gray = gray.copy()
-        prev_lip_pts = cur_pts if cur_pts is not None else (lip_pts_np.astype(np.float32) if lip_pts_np is not None else None)
+        prev_lip_pts = lip_pts_np.astype(np.float32) if lip_pts_np is not None else None
 
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break

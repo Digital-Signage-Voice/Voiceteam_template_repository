@@ -16,7 +16,7 @@ class MLClassifier:
 
     def predict(self, feat):
         """
-        feat: [lip_ratio, flow_mag, diff_val] 리스트
+        feat: [lip_ratio, diff_val] 리스트
         반환: True -> 발화, False -> 비발화
         """
         
