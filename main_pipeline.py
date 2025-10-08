@@ -35,52 +35,52 @@ def run_voice_team_pipeline(input_video_path: str, output_audio_path: str):
     final_audio_data = full_audio_data.copy()
 
     # --- 3단계: 파이프라인 실행 (프레임 단위 처리) ---
-    print("\n🔄 3단계: 영상의 각 프레임을 순서대로 처리하며 파이프라인을 실행합니다...")
-    
-    # 동영상 파일을 한 프레임씩 읽기 위해 OpenCV를 사용합니다.
-    cap = cv2.VideoCapture(input_video_path)
-    frame_id = 0
-    while cap.isOpened():
-        ret, frame = cap.read()
-        if not ret:
-            break
+print("\n🔄 3단계: 영상의 각 프레임을 순서대로 처리하며 파이프라인을 실행합니다...")
 
-        # ✨ 핵심 통합 지점 ✨
-        # 현재 프레임을 현지님의 엔진에 넣고, 분석 결과를 딕셔너리로 받습니다.
-        result_dict = video_processor.process_frame(frame_id, frame)
-        
-        is_speaking = result_dict['is_speaking']
-        timestamp = result_dict['timestamp']
+cap = cv2.VideoCapture(input_video_path)
+frame_id = 0
+fps = cap.get(cv2.CAP_PROP_FPS)  # 영상의 초당 프레임 수
+frame_duration = 1 / fps        # 한 프레임이 차지하는 시간 (초)
 
-        print(f"  - Frame #{frame_id}: 현재 시간 {timestamp:.2f}초, 발화 여부: {is_speaking}")
+processed_audio_segments = []  # 처리된 오디오 조각들을 모아둘 리스트
 
-        # 만약 '발화 중' 이라면, 해당 시간대의 오디오에 원후님의 모듈을 적용
-        # (이 부분은 추후 원후님 모듈이 실시간 청크 단위를 지원하면 더 정교화될 예정)
-        # 지금은 간단히 'speech_segments' 정보를 활용
-        if result_dict['speech_segments']:
-             for segment in result_dict['speech_segments']:
-                start_time = segment.get('start')
-                # 'end'는 아직 없으므로, 지금은 이 로직을 단순화하여 적용
-                # 이 부분은 앞으로 원후님과 함께 더 발전시켜야 합니다.
+while cap.isOpened():
+    ret, frame = cap.read()
+    if not ret:
+        break
 
-        frame_id += 1
-    
-    cap.release()
-    print("\n✅ 영상의 모든 프레임 처리가 완료되었습니다.")
+    # 1. 현지님 모듈로 영상 프레임 분석
+    result_dict = video_processor.process_frame(frame_id, frame)
+    is_speaking = result_dict['is_speaking']
+    timestamp = result_dict['timestamp']
 
-    # (임시) 현재는 오프라인 방식이므로, 분석 결과를 바탕으로 후처리하는 로직이 필요
-    # 이 부분은 추후 실시간 구조로 변경되면서 수정될 것입니다.
-    # 지금은 원후님 모듈을 호출하는 부분을 비워두고, 파이프라인이 연결되는 것만 확인합니다.
+    print(f"  - Frame #{frame_id}: 현재 시간 {timestamp:.2f}초, 발화 여부: {is_speaking}")
 
-    # --- 4단계: 최종 결과물 저장 ---
-    print("\n💾 4단계: 최종 오디오를 파일로 저장합니다...")
-    # sf.write(output_audio_path, final_audio_data, sample_rate) # 아직 실제 처리가 없으므로 주석 처리
-    print(f"🎉 성공! 파이프라인 실행이 완료되었습니다. (경로: '{output_audio_path}')")
+    # 2. 타임스탬프를 이용해 현재 프레임에 해당하는 오디오 조각 추출
+    start_sample = int(timestamp * sample_rate)
+    end_sample = int((timestamp + frame_duration) * sample_rate)
+    audio_chunk = full_audio_data[start_sample:end_sample]
 
+    # 3. ✨ 핵심 통합 로직 ✨
+    if is_speaking:
+        # '발화 중'이면 원후님 모듈로 오디오 처리 (예: 노이즈 제거)
+        processed_chunk = denoise_audio(audio_chunk, sample_rate)
+        processed_audio_segments.append(processed_chunk)
+    else:
+        # '비발화 중'이면 소리를 0으로 만들어 Mute 처리
+        silence_chunk = np.zeros_like(audio_chunk)
+        processed_audio_segments.append(silence_chunk)
 
-# --- 이 파일을 직접 실행했을 때만 아래 코드가 동작합니다 ---
-if __name__ == "__main__":
-    test_video = "data/input/your_test_video.mp4"  # 실제 테스트할 영상 파일 경로를 넣어주세요.
-    output_wav = "data/output/final_clean_audio.wav"
+    frame_id += 1
 
-    run_voice_team_pipeline(test_video, output_wav)
+cap.release()
+print("\n✅ 영상의 모든 프레임 처리가 완료되었습니다.")
+
+# --- 4단계: 후처리 및 결과물 저장 ---
+print("\n💾 4단계: 처리된 오디오 조각들을 하나로 합쳐 파일로 저장합니다...")
+
+# 모든 오디오 조각들을 하나로 합칩니다.
+final_audio_data = np.concatenate(processed_audio_segments)
+
+sf.write(output_audio_path, final_audio_data, sample_rate)
+print(f"🎉 성공! 파이프라인 실행이 완료되었습니다. (경로: '{output_audio_path}')")
