@@ -17,9 +17,9 @@ from src.audio.audio_module import denoise_audio
 
 def run_voice_team_pipeline(input_video_path: str, output_audio_path: str):
     """
-    우리 Voice팀의 전체 파이프라인을 실행합니다.
+    우리 1팀의 전체 파이프라인을 실행합니다.
     """
-    print("🚀 Voice팀 전체 파이프라인 v2를 시작합니다!")
+    print("🚀 1팀 전체 파이프라인 v2를 시작합니다!")
 
     # --- 1단계: 모듈 준비 ---
     # 현지님의 영상 처리 엔진을 생성합니다. (오프라인 영상 파일 모드)
