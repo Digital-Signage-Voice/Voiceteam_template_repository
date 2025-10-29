@@ -16,9 +16,9 @@ class SpectralNoiseReducer:
         
         self.n_freq_bins = n_fft // 2 + 1
         
-        # --- 초기 소음 프로파일 설정 (손님 요청: "강한 걸로 교체") ---
+        # --- 초기 소음 프로파일 설정---
         # 묵음(-inf)이 아닌, -40dB 정도의 약한 잡음이 깔려있다고 가정
-        # (이전 V8의 -80dB보다 훨씬 '강한' 초기값)
+
         initial_noise_power = 10**(initial_noise_db / 10)
         initial_noise_magnitude = np.sqrt(initial_noise_power)
         
@@ -110,7 +110,7 @@ if __name__ == "__main__":
     HOP_LENGTH = N_FFT // 4 # (512)
     # -----------------
 
-    # v6: VAD 적용
+    #VAD 적용
     output_filename = f'cleaned_audio_v6_adaptive_vad_{VAD_ENERGY_THRESHOLD:.3f}.wav'
     OUTPUT_WAV = os.path.join(PROCESSED_DATA_DIR, output_filename)
 
