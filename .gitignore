@@ -8,3 +8,11 @@ __pycache__/
 
 # VS Code 설정 폴더 무시
 .vscode/
+
+# data 폴더 무시
+data/raw/
+data/processed/
+src/recognizer/audio/data/processed/
+
+# visualize 폴더 무시
+visualize/
