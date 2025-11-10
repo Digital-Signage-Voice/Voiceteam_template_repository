@@ -136,7 +136,7 @@ class VideoProcessor:
             "roi": roi_dict,
             "is_speaking": bool(speaking),
             "confidence": round(float(combined_confidence), 3),
-            "flags": flags,
+            # "flags": flags,
             "person_detected": person_detected
         }
 
