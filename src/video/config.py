@@ -17,8 +17,8 @@ class Config:
     
     # ====== 시각화(창 관련) ======
     window_name: str = "Prototype"    # 창 이름
-    window_width: int = 640   # 가로형  
-    window_height: int = 480   # 세로형 
+    window_width: int = 1080   # 가로형  
+    window_height: int = 720   # 세로형 
 
 
 cfg = Config()
