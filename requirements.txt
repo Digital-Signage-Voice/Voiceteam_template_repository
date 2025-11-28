@@ -83,7 +83,6 @@ pandas==2.3.3
 pillow==11.3.0
 platformdirs==4.5.0
 pooch==1.8.2
-protobuf==4.25.8
 pycparser==2.23
 pydantic==2.11.10
 pydantic_core==2.33.2
@@ -130,3 +129,10 @@ typing-inspection==0.4.2
 typing_extensions==4.15.0
 tzdata==2025.2
 urllib3==2.5.0
+numpy
+opencv-python
+moviepy
+soundfile
+openai-whisper
+mediapipe
+jiwer
