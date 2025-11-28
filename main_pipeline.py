@@ -10,6 +10,7 @@ from faster_whisper import WhisperModel
 import warnings
 import noisereduce as nr
 from PIL import Image, ImageDraw, ImageFont
+import textwrap
 
 warnings.filterwarnings("ignore")
 
@@ -42,6 +43,14 @@ TRANSCRIPTION_INTERVAL = 2.0  # STT 변환 주기 (초)
 audio_queue = queue.Queue()
 latest_stt_result = ""  # 화면에 표시할 최신 인식 텍스트
 
+# [NEW] 영상-음성 공유 컨텍스트
+# 스레드 안전성을 위해 간단한 dict 사용 (GIL 덕분에 atomic read/write 가능)
+visual_context = {
+    "person_detected": False,  # 사람이 화면에 있는지 여부
+    "is_speaking": False,      # 입을 움직이고 있는지 여부
+    "use_visual_gating": True  # [Toggle] True: AV Mode (Gating), False: Audio Only
+}
+
 def audio_callback(indata, frames, time, status):
     """마이크에서 들어오는 오디오 데이터를 큐에 넣는 콜백 함수"""
     if status:
@@ -71,13 +80,23 @@ def stt_worker(model):
 
             # 2. 일정 시간 이상의 오디오가 모이면 STT 수행
             if len(audio_buffer) >= SAMPLE_RATE * TRANSCRIPTION_INTERVAL:
+                # [Visual Gating] AV Mode일 때만 사람 감지 여부 확인
+                if visual_context["use_visual_gating"] and not visual_context["person_detected"]:
+                    # print("🔇 [STT] 사람이 감지되지 않아 오디오 무시됨 (Visual Gating)")
+                    # 버퍼 비우기 (계속 쌓이면 나중에 한꺼번에 처리되므로)
+                    audio_buffer = np.array([], dtype=np.float32)
+                    time.sleep(0.1)
+                    continue
+
                 # 분석할 구간만큼 잘라내기
                 process_len = int(SAMPLE_RATE * TRANSCRIPTION_INTERVAL)
                 chunk = audio_buffer[:process_len]
                 audio_buffer = audio_buffer[process_len:] # 남은 부분은 유지 (오버랩 가능)
                 
-                # 노이즈 제거 (일단 비활성화)
-                # chunk = nr.reduce_noise(y=chunk, sr=SAMPLE_RATE)
+                # 노이즈 제거 (활성화됨)
+                # stationary=True: 배경 소음이 일정하다고 가정 (시장 소음 등)
+                # prop_decrease=0.8: 소음을 80%만 줄여서 목소리 왜곡 방지
+                chunk = nr.reduce_noise(y=chunk, sr=SAMPLE_RATE, stationary=True, prop_decrease=0.8)
                 
                 print(f"🎤 [STT] 오디오 처리 중... (크기: {len(chunk)})")
                 start_t = time.time()
@@ -101,8 +120,8 @@ def stt_worker(model):
             print(f"❌ STT Error: {e}")
             time.sleep(1)
 
-def put_text_korean(img, text, position, font_size=20, color=(255, 255, 255)):
-    """한글 텍스트를 이미지에 그리는 함수 (PIL 사용)"""
+def put_text_korean(img, text, position, font_size=20, color=(255, 255, 255), max_width=None):
+    """한글 텍스트를 이미지에 그리는 함수 (PIL 사용) - 자동 줄바꿈 기능 추가"""
     img_pil = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
     draw = ImageDraw.Draw(img_pil)
     try:
@@ -112,7 +131,22 @@ def put_text_korean(img, text, position, font_size=20, color=(255, 255, 255)):
         # 폰트가 없으면 기본 폰트 (한글 깨질 수 있음)
         font = ImageFont.load_default()
     
-    draw.text(position, text, font=font, fill=color)
+    x, y = position
+    
+    # 텍스트 줄바꿈 처리
+    if max_width:
+        # 대략적인 글자 수로 줄바꿈 (정확한 픽셀 계산은 복잡하므로 간소화)
+        # 한글/영어 혼용 시 오차가 있을 수 있음. 폰트 크기에 따라 조정 필요.
+        # font_size 30 기준, 화면 너비 640 -> 약 20~25자
+        char_per_line = int(max_width / (font_size * 0.7)) 
+        lines = textwrap.wrap(text, width=char_per_line)
+    else:
+        lines = [text]
+
+    for line in lines:
+        draw.text((x, y), line, font=font, fill=color)
+        y += int(font_size * 1.5) # 줄 간격
+
     return cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
 
 # =========================================================
@@ -174,23 +208,59 @@ def run_realtime_pipeline():
         # (2) 영상 분석 (Lip Reading & Face Detection)
         result = video_processor.process_frame(frame_id, frame)
         
+        # [Visual Gating] 공유 변수 업데이트
+        visual_context["person_detected"] = result["person_detected"]
+        visual_context["is_speaking"] = result["is_speaking"]
+        
         # (3) 시각화 (기본 오버레이)
         frame_vis = Overlay.draw(frame.copy(), result)
+        h, w = frame_vis.shape[:2]
+
+        # [Visual Blackout] Audio Only 모드일 때는 화면을 검게 처리
+        if not visual_context["use_visual_gating"]:
+            frame_vis = np.zeros((h, w, 3), dtype=np.uint8)
         
         # (4) STT 결과 화면에 추가 (하단에 표시)
-        h, w = frame_vis.shape[:2]
-        # 텍스트 배경 박스
-        cv2.rectangle(frame_vis, (0, h-60), (w, h), (0, 0, 0), -1)
+        # 텍스트 배경 박스 (높이 늘림)
+        cv2.rectangle(frame_vis, (0, h-120), (w, h), (0, 0, 0), -1)
         
         # 인식된 텍스트 (한글 출력을 위해 PIL 사용)
-        stt_display = f"STT: {latest_stt_result}"
-        frame_vis = put_text_korean(frame_vis, stt_display, (20, h-40), font_size=30, color=(255, 255, 255))
+        if not visual_context["use_visual_gating"]:
+            # Audio Only Mode
+            mode_text = "Audio Mode: Always On"
+            status_text = "Listening..."
+            status_color = (0, 255, 255) # Yellow
+            stt_display = f"{latest_stt_result}"
+        elif visual_context["person_detected"]:
+            # AV Mode - Detected
+            mode_text = "Visual Mode: Active"
+            status_text = "Listening..."
+            status_color = (0, 255, 0) # Green
+            stt_display = f"{latest_stt_result}"
+        else:
+            # AV Mode - Not Detected
+            mode_text = "👤 Visual Mode: Standby"
+            status_text = "Waiting for user..."
+            status_color = (0, 0, 255) # Red
+            stt_display = "(Paused)"
+            
+        # 상태 표시
+        cv2.putText(frame_vis, mode_text, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+        cv2.putText(frame_vis, status_text, (20, h-90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, status_color, 2)
+        
+        # STT 텍스트 (줄바꿈 적용)
+        frame_vis = put_text_korean(frame_vis, stt_display, (20, h-60), font_size=28, color=(255, 255, 255), max_width=w-40)
 
         # (5) 화면 출력
         cv2.imshow(cfg.window_name, frame_vis)
         
-        if cv2.waitKey(1) & 0xFF == ord('q'):
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord('q'):
             break
+        elif key == ord('t'):
+            # 모드 토글
+            visual_context["use_visual_gating"] = not visual_context["use_visual_gating"]
+            print(f"🔄 모드 전환: {'A-V Fusion' if visual_context['use_visual_gating'] else 'Audio Only'}")
             
         frame_id += 1
 
