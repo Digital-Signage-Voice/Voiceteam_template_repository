@@ -116,10 +116,11 @@ class VideoProcessor:
         feature_quality = self.calc_feature_quality(det)
         lip_ratio = self.calc_lip_ratio(det)
         
+        # 통합된 신뢰도
         combined_confidence = (
-            0.5 * detection_conf +
+            0.4 * detection_conf +
             0.3 * feature_quality +
-            0.2 * lip_ratio
+            0.4 * lip_ratio
         )
 
         combined_confidence = min(max(combined_confidence, 0.0), 1.0)
@@ -141,7 +142,6 @@ class VideoProcessor:
         }
 
         return result
-
 
     
     def run(self):
