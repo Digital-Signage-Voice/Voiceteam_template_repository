@@ -12,7 +12,6 @@ class WebcamReader:
 
 
     def read(self):
-        ret, frame = self.cap.read()
         return self.cap.read()
 
 
@@ -23,4 +22,3 @@ class WebcamReader:
 
     def release(self):
         self.cap.release()
-        

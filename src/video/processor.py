@@ -82,7 +82,19 @@ class VideoProcessor:
                     lip_pts_np[:, 1] += y1
                     ratio = det.get('lip_ratio', 0.0)
             except Exception as e:
-                print(f"{RED}[Warning] LipExtractor 오류: {e}{RESET}")
+                print(f"{RED}[Warning] LipExtractor 오류 (ROI): {e}{RESET}")
+
+        # 3-1️⃣ Fallback: ROI에서 실패했거나 사람이 감지되지 않은 경우 전체 프레임에서 시도
+        if det is None:
+            try:
+                # 전체 프레임에서 시도 (속도는 느릴 수 있음)
+                det = self.extractor.extract(frame)
+                if det:
+                    lip_pts_np = det['lip_points']
+                    # 전체 프레임 기준이므로 좌표 변환 필요 없음
+                    ratio = det.get('lip_ratio', 0.0)
+            except Exception as e:
+                pass # Fallback도 실패하면 무시
 
         # 4️⃣ 프레임 차이 계산
         diff_val = frame_difference(self.prev_gray, gray, lip_pts_np)

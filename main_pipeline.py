@@ -1,114 +1,205 @@
-import cv2
-import numpy as np
-import soundfile as sf
-from moviepy.editor import VideoFileClip
-import whisper  # STT 라이브러리
 import sys
 import os
+import cv2
+import numpy as np
+import threading
+import queue
+import time
+import sounddevice as sd
+from faster_whisper import WhisperModel
+import warnings
+import noisereduce as nr
+from PIL import Image, ImageDraw, ImageFont
 
-# --- 🛠️ 경로 설정 (중요!) ---
-# 'audio-module' 처럼 하이픈(-)이 있는 폴더는 파이썬에서 바로 import가 안 됩니다.
-# 그래서 강제로 경로를 추가해주는 코드입니다.
+warnings.filterwarnings("ignore")
+
+# =========================================================
+# [1단계] 경로 설정
+# =========================================================
 current_dir = os.path.dirname(os.path.abspath(__file__))
+src_path = os.path.join(current_dir, 'src')
+video_path = os.path.join(src_path, 'video')
 audio_module_path = os.path.join(current_dir, "audio-module", "src", "recognizer", "audio")
-sys.path.append(audio_module_path)
 
-# --- 모듈 통합 ---
-from src.video.processor import VideoProcessor
-try:
-    # 원후님 파일명이 rvd.py 라고 가정 (업로드된 파일 기준)
-    from rvd import IntelligentNoiseReducer
-    print("✅ 원후님 음성 모듈(rvd) 로딩 성공!")
-except ImportError as e:
-    print(f"⚠️ 음성 모듈 로딩 실패: {e}")
-    print("폴더 구조나 파일명을 확인해주세요.")
-    sys.exit(1)
+if video_path not in sys.path: sys.path.insert(0, video_path)
+if src_path not in sys.path: sys.path.insert(1, src_path)
+if audio_module_path not in sys.path: sys.path.append(audio_module_path)
 
+from video.processor import VideoProcessor
+from video.visualization.overlay import Overlay
+from video.config import cfg
 
-def run_voice_team_pipeline(input_video_path: str, output_audio_path: str):
-    """
-    영상 처리 -> 음성 잡음 제거 -> 최종 STT 변환까지 수행하는 통합 파이프라인
-    """
-    print(f"\n🚀 [Voice Team] 전체 파이프라인 시작: {input_video_path}")
+# =========================================================
+# [2단계] 실시간 오디오 처리 설정 (Global 변수 및 함수)
+# =========================================================
+# 오디오 설정
+SAMPLE_RATE = 16000
+CHANNELS = 1
+BLOCK_SIZE = 1024  # 한 번에 처리할 오디오 데이터 크기
+TRANSCRIPTION_INTERVAL = 2.0  # STT 변환 주기 (초)
 
-    # --- 0. STT 모델 로딩 ---
-    print("⏳ [0단계] Whisper STT 모델 로딩 중... (잠시만 기다려주세요)")
-    stt_model = whisper.load_model("base") 
-    print("✅ 모델 로딩 완료!")
+# 스레드 간 데이터 공유를 위한 큐와 변수
+audio_queue = queue.Queue()
+latest_stt_result = ""  # 화면에 표시할 최신 인식 텍스트
 
-    # --- 1. 모듈 준비 ---
-    print("🛠️ [1단계] 영상/음성 처리 엔진 준비 중...")
-    # 현지님 영상 엔진
-    video_processor = VideoProcessor(source='video', path=input_video_path, visualize=False)
+def audio_callback(indata, frames, time, status):
+    """마이크에서 들어오는 오디오 데이터를 큐에 넣는 콜백 함수"""
+    if status:
+        print(status, file=sys.stderr)
+    audio_queue.put(indata.copy())
+
+def stt_worker(model):
+    """백그라운드에서 오디오를 모아 STT를 수행하는 워커 스레드"""
+    global latest_stt_result
+    audio_buffer = np.array([], dtype=np.float32)
     
-    # 동영상에서 오디오 데이터 추출
-    video_clip = VideoFileClip(input_video_path)
-    full_audio_data = video_clip.audio.to_soundarray()
-    sample_rate = video_clip.audio.fps
+    print("🎙️ [Audio] STT 워커 스레드 시작됨")
     
-    # 원후님 음성 엔진
-    audio_reducer = IntelligentNoiseReducer(sample_rate=sample_rate)
+    while True:
+        try:
+            # 1. 큐에 쌓인 오디오 데이터 수집
+            while not audio_queue.empty():
+                data = audio_queue.get()
+                # 2차원 배열(프레임, 채널)을 1차원으로 평탄화하여 추가
+                audio_buffer = np.concatenate((audio_buffer, data.flatten()))
+            
+            # [최적화] 버퍼가 너무 길면(예: 10초 이상) 최신 5초만 남기고 버림 (Backlog 방지)
+            if len(audio_buffer) > SAMPLE_RATE * 10.0:
+                print(f"⚠️ [STT] 버퍼 과부하! 오래된 오디오 삭제됨 ({len(audio_buffer)/SAMPLE_RATE:.1f}초 -> 5.0초)")
+                keep_len = int(SAMPLE_RATE * 5.0)
+                audio_buffer = audio_buffer[-keep_len:]
 
-    print("🔄 [2단계] 프레임 단위 처리 및 멀티모달 분석 시작...")
+            # 2. 일정 시간 이상의 오디오가 모이면 STT 수행
+            if len(audio_buffer) >= SAMPLE_RATE * TRANSCRIPTION_INTERVAL:
+                # 분석할 구간만큼 잘라내기
+                process_len = int(SAMPLE_RATE * TRANSCRIPTION_INTERVAL)
+                chunk = audio_buffer[:process_len]
+                audio_buffer = audio_buffer[process_len:] # 남은 부분은 유지 (오버랩 가능)
+                
+                # 노이즈 제거 (일단 비활성화)
+                # chunk = nr.reduce_noise(y=chunk, sr=SAMPLE_RATE)
+                
+                print(f"🎤 [STT] 오디오 처리 중... (크기: {len(chunk)})")
+                start_t = time.time()
+
+                # Whisper STT 수행 (한국어) - faster-whisper
+                # segments는 제너레이터이므로 리스트로 변환하여 텍스트 추출
+                segments, info = model.transcribe(chunk, vad_filter=True, language="ko")
+                text = " ".join([segment.text for segment in segments]).strip()
+                
+                if text:
+                    latest_stt_result = text
+                    print(f"🗣️ [인식됨]: {text}")
+                else:
+                    print("... (침묵 또는 인식 실패)")
+                
+                print(f"⏱️ [STT] 처리 시간: {time.time() - start_t:.2f}초")
+            
+            time.sleep(0.1) # CPU 점유율 조절
+            
+        except Exception as e:
+            print(f"❌ STT Error: {e}")
+            time.sleep(1)
+
+def put_text_korean(img, text, position, font_size=20, color=(255, 255, 255)):
+    """한글 텍스트를 이미지에 그리는 함수 (PIL 사용)"""
+    img_pil = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+    draw = ImageDraw.Draw(img_pil)
+    try:
+        # 윈도우 기본 폰트 (맑은 고딕)
+        font = ImageFont.truetype("malgun.ttf", font_size)
+    except:
+        # 폰트가 없으면 기본 폰트 (한글 깨질 수 있음)
+        font = ImageFont.load_default()
     
-    # --- 2. 파이프라인 실행 (시뮬레이션) ---
-    cap = cv2.VideoCapture(input_video_path)
+    draw.text(position, text, font=font, fill=color)
+    return cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
+
+# =========================================================
+# [3단계] 메인 파이프라인 실행
+# =========================================================
+def run_realtime_pipeline():
+    print(f"\n🚀 [Voice Team] 실시간 통합 파이프라인 시작 (Webcam + Mic)")
+
+    # 1. Whisper 모델 로딩
+    print("⏳ [Init] Whisper 모델 로딩 중... (faster-whisper base int8)")
+    try:
+        # faster-whisper 모델 로드 (CPU, INT8 양자화) - 가장 가벼운 base 모델 사용
+        stt_model = WhisperModel("base", device="cpu", compute_type="int8")
+        print("✅ 모델 로딩 완료!")
+    except Exception as e:
+        print(f"❌ Whisper 로딩 실패: {e}")
+        return
+
+    # 2. 오디오 스레드 시작
+    # 데몬 스레드(daemon=True)로 설정하여 메인 프로그램 종료 시 같이 종료되게 함
+    stt_thread = threading.Thread(target=stt_worker, args=(stt_model,), daemon=True)
+    stt_thread.start()
+
+    # 3. 마이크 녹음 시작 (SoundDevice)
+    try:
+        stream = sd.InputStream(
+            samplerate=SAMPLE_RATE, 
+            blocksize=BLOCK_SIZE, 
+            device=None, # 기본 마이크 사용
+            channels=CHANNELS, 
+            callback=audio_callback
+        )
+        stream.start()
+        print("✅ 마이크 입력 시작됨")
+    except Exception as e:
+        print(f"❌ 마이크 열기 실패: {e}")
+        print("💡 팁: 사용 가능한 마이크가 없거나 권한이 없을 수 있습니다.")
+        return
+
+    # 4. 영상 프로세서 초기화
+    # webcam 모드 사용 (path=None)
+    # ML 모델 대신 규칙 기반 분류기 사용 (False)
+    video_processor = VideoProcessor(source='webcam', path=None, visualize=False, use_ml=False)
+    
+    print("🎥 [Start] 영상 분석 시작... (종료: 화면 클릭 후 'q' 입력)")
+
+    # VideoProcessor의 run() 대신 직접 루프를 돌려 STT 텍스트를 화면에 추가합니다.
     frame_id = 0
-    
-    # (실제로는 여기서 프레임별로 is_speaking을 뽑고, 오디오를 청크로 잘라 넣어야 함)
-    # 이번 데모에서는 원후님 모듈의 '전체 처리' 기능을 활용하거나, 
-    # 개념적으로 연결되었음을 보여주기 위해 영상 분석만 루프를 돌립니다.
-    
-    while cap.isOpened():
-        ret, frame = cap.read()
+    while True:
+        # (1) 영상 프레임 읽기
+        ret, frame = video_processor.cap.read()
         if not ret:
+            print("⚠️ 웹캠 신호 없음")
             break
         
-        # 현지님 모듈 실행 (잘 돌아가는지 확인용)
-        # 속도를 위해 30프레임마다 한 번씩만 로그 출력
-        video_result = video_processor.process_frame(frame_id, frame)
-        if frame_id % 30 == 0:
-            print(f"   Running.. Frame {frame_id}: Speaking? {video_result['is_speaking']}")
+        # 좌우 반전 (거울 모드)
+        frame = cv2.flip(frame, 1)
+
+        # (2) 영상 분석 (Lip Reading & Face Detection)
+        result = video_processor.process_frame(frame_id, frame)
         
+        # (3) 시각화 (기본 오버레이)
+        frame_vis = Overlay.draw(frame.copy(), result)
+        
+        # (4) STT 결과 화면에 추가 (하단에 표시)
+        h, w = frame_vis.shape[:2]
+        # 텍스트 배경 박스
+        cv2.rectangle(frame_vis, (0, h-60), (w, h), (0, 0, 0), -1)
+        
+        # 인식된 텍스트 (한글 출력을 위해 PIL 사용)
+        stt_display = f"STT: {latest_stt_result}"
+        frame_vis = put_text_korean(frame_vis, stt_display, (20, h-40), font_size=30, color=(255, 255, 255))
+
+        # (5) 화면 출력
+        cv2.imshow(cfg.window_name, frame_vis)
+        
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+            
         frame_id += 1
 
-    cap.release()
-
-    # --- 3. 오디오 정제 및 저장 ---
-    print("\n🧹 [3단계] 음성 잡음 제거(Denoising) 수행 중...")
-    # 원후님 모듈을 거쳐서 나온 깨끗한 오디오라고 가정하고 저장
-    # (실제 통합 시에는 audio_reducer.process_chunk를 루프 안에서 호출)
-    sf.write(output_audio_path, full_audio_data, sample_rate) 
-    print(f"💾 깨끗한 오디오 저장 완료: {output_audio_path}")
-
-
-    # --- ⭐️ 4. 대망의 STT 변환 ⭐️ ---
-    print("\n🔍 [4단계] 최종 STT 변환을 시작합니다...")
-    
-    result = stt_model.transcribe(output_audio_path)
-    recognized_text = result["text"]
-
-    print("\n" + "="*60)
-    print(" 🎉 [최종 결과] Voice Team Pipeline Output 🎉 ")
-    print("="*60)
-    print(f"\n▶️  인식된 텍스트: \"{recognized_text.strip()}\"\n")
-    print("="*60)
+    # 종료 처리
+    stream.stop()
+    stream.close()
+    video_processor.cap.release()
+    cv2.destroyAllWindows()
+    print("👋 프로그램이 종료되었습니다.")
 
 if __name__ == "__main__":
-    # --- 실행 설정 ---
-    # 테스트할 비디오 파일 경로를 여기에 적어주세요!
-    # (해찬님 컴퓨터에 있는 실제 파일 경로로 수정 필요)
-    test_video_path = "data/input/test_video.mp4" 
-    
-    # 결과가 저장될 경로
-    output_wav_path = "data/output/final_output.wav"
-
-    # 폴더가 없으면 에러나니까 미리 만들어주는 센스
-    os.makedirs("data/output", exist_ok=True)
-
-    if os.path.exists(test_video_path):
-        run_voice_team_pipeline(test_video_path, output_wav_path)
-    else:
-        print(f"\n⚠️ 오류: 테스트 영상을 찾을 수 없습니다!")
-        print(f"경로를 확인해주세요: {test_video_path}")
-        print("팁: main_pipeline.py의 맨 아래쪽 'test_video_path'를 수정하세요.")
+    run_realtime_pipeline()
