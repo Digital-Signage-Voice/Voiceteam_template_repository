@@ -82,7 +82,19 @@ class VideoProcessor:
                     lip_pts_np[:, 1] += y1
                     ratio = det.get('lip_ratio', 0.0)
             except Exception as e:
-                print(f"{RED}[Warning] LipExtractor 오류: {e}{RESET}")
+                print(f"{RED}[Warning] LipExtractor 오류 (ROI): {e}{RESET}")
+
+        # 3-1️⃣ Fallback: ROI에서 실패했거나 사람이 감지되지 않은 경우 전체 프레임에서 시도
+        if det is None:
+            try:
+                # 전체 프레임에서 시도 (속도는 느릴 수 있음)
+                det = self.extractor.extract(frame)
+                if det:
+                    lip_pts_np = det['lip_points']
+                    # 전체 프레임 기준이므로 좌표 변환 필요 없음
+                    ratio = det.get('lip_ratio', 0.0)
+            except Exception as e:
+                pass # Fallback도 실패하면 무시
 
         # 4️⃣ 프레임 차이 계산
         diff_val = frame_difference(self.prev_gray, gray, lip_pts_np)
@@ -116,13 +128,21 @@ class VideoProcessor:
         feature_quality = self.calc_feature_quality(det)
         lip_ratio = self.calc_lip_ratio(det)
         
-        # 통합된 신뢰도
-        combined_confidence = (
-            0.4 * detection_conf +
-            0.3 * feature_quality +
-            0.4 * lip_ratio
-        )
+        # lip_ratio 보정, 0.65 이하 모두 그대로 반영, 0.65~0.8 약간 감점, 0.8 이상이면 고정
+        if lip_ratio > 0.8:
+            ratio_for_conf = 0.65
+        elif lip_ratio > 0.65:
+            ratio_for_conf = 0.9 * lip_ratio
+        else:
+            ratio_for_conf = lip_ratio
 
+        # frame_diff scale 상향(움직임 강할 때 confidence가 1까지 오를 수 있도록)
+        combined_confidence = (
+            0.15 * detection_conf +
+            0.1 * feature_quality +
+            0.35 * ratio_for_conf +
+            0.4 * min(diff_val * 2, 1.0)
+        )
         combined_confidence = min(max(combined_confidence, 0.0), 1.0)
 
         # 9️⃣ flags

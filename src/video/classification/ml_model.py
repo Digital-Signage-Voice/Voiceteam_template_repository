@@ -25,5 +25,5 @@ class MLClassifier:
         # 예측 확률
         prob = self.model.predict_proba(feat_scaled)[0]
         
-        # 확률 기준 0.5 이상이면 speaking
-        return prob[1] > 0.5
+        # 확률 기준 0.5 이상이면 speaking (Class 0이 Speaking으로 학습된 것으로 보임)
+        return prob[0] > 0.5
