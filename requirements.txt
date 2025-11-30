@@ -156,3 +156,5 @@ soundfile==0.13.1
 soxr==1.0.0
 ultralytics-thop==2.0.18
 ultralytics==8.3.227
+
+faster-whisper
