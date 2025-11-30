@@ -118,9 +118,6 @@ class VideoProcessor:
         else:
             roi_dict = None
 
-        # ✅ 신뢰도 계산
-        # detection_conf = self.calc_detection_conf(detections, main_target)
-        
         if main_target:
             detection_conf = main_target['conf']  # YOLOv5 출력값
         else:
@@ -157,7 +154,6 @@ class VideoProcessor:
             "roi": roi_dict,
             "is_speaking": bool(speaking),
             "confidence": round(float(combined_confidence), 3),
-            # "flags": flags,
             "person_detected": person_detected
         }
 
