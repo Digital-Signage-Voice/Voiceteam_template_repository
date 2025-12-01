@@ -44,6 +44,9 @@ class VideoProcessor:
         # 이전 프레임 정보
         self.prev_gray = None
         self.prev_lip_pts = None
+        
+        # [NEW] 스무딩을 위한 이전 신뢰도 저장 변수
+        self.prev_confidence = 0.0
 
    
     def process_frame(self, frame_id, frame):
@@ -99,7 +102,7 @@ class VideoProcessor:
         # 4️⃣ 프레임 차이 계산
         diff_val = frame_difference(self.prev_gray, gray, lip_pts_np)
 
-        # 5️⃣ 분류
+        # 5️⃣ 분류 (Speaking 여부 판단)
         if self.use_ml and self.ml_cls is not None:
             feat = [ratio or 0.0, diff_val]
             speaking = self.ml_cls.predict(feat)
@@ -125,7 +128,7 @@ class VideoProcessor:
         feature_quality = self.calc_feature_quality(det)
         lip_ratio = self.calc_lip_ratio(det)
         
-        # lip_ratio 보정, 0.65 이하 모두 그대로 반영, 0.65~0.8 약간 감점, 0.8 이상이면 고정
+        # lip_ratio 보정 logic
         if lip_ratio > 0.8:
             ratio_for_conf = 0.65
         elif lip_ratio > 0.65:
@@ -133,14 +136,48 @@ class VideoProcessor:
         else:
             ratio_for_conf = lip_ratio
 
-        # frame_diff scale 상향(움직임 강할 때 confidence가 1까지 오를 수 있도록)
-        combined_confidence = (
-            0.15 * detection_conf +
-            0.1 * feature_quality +
-            0.35 * ratio_for_conf +
-            0.4 * min(diff_val * 2, 1.0)
-        )
+        # -------------------------------------------------------------------------
+        # [8️⃣ Confidence Calculation - Improved]
+        # 사용자 요청 반영: Boolean Boost + Smoothing + Sensitivity Up
+        # -------------------------------------------------------------------------
+        
+        # [A] Sensitivity Boost (작은 움직임도 점수화)
+        # diff_val이 0.1(작음) -> 0.8점
+        score_diff = min(diff_val * 8.0, 1.0)
+        
+        # 입이 조금이라도(0.2) 열리면 점수 부여 (기존 0.25 -> 0.2로 완화)
+        score_ratio = 0.0
+        if ratio_for_conf > 0.2:
+            score_ratio = min((ratio_for_conf - 0.2) * 5.0, 1.0)
+
+        # [B] Raw Confidence Calculation
+        # 움직임(Diff)에 더 큰 비중 (70%)
+        raw_conf = (0.7 * score_diff) + (0.3 * score_ratio)
+
+        # [C] Boolean Boost (핵심 로직)
+        # 이미 분류기(Rule/ML)가 "말하고 있음"이라고 판단했다면, 
+        # 입을 잠깐 다무는 순간이어도 높은 점수를 강제 부여.
+        if speaking:
+            # 최소 0.75점 보장 + 보너스
+            # (예: 계산값이 0.3이어도 -> 0.75로 점프)
+            raw_conf = max(raw_conf, 0.65) + 0.1
+        
+        # [D] Smoothing (Inertia)
+        # 점수가 갑자기 떨어지는 것을 방지 (이전 값 70% 반영)
+        # 비발화로 바뀌더라도 천천히 점수가 내려감 -> Flickering 방지
+        combined_confidence = (0.3 * raw_conf) + (0.7 * self.prev_confidence)
+
+        # [E] Safety Gating
+        # 사람이 없거나 화질이 너무 나쁘면 강제 0
+        if not person_detected or feature_quality < 0.2:
+            combined_confidence = 0.0
+
+        # 범위 제한 (0.0 ~ 1.0)
         combined_confidence = min(max(combined_confidence, 0.0), 1.0)
+        
+        # 다음 프레임을 위해 저장
+        self.prev_confidence = combined_confidence
+        # -------------------------------------------------------------------------
 
         # 9️⃣ flags
         flags = {
@@ -231,4 +268,3 @@ class VideoProcessor:
         if det is None:
             return 0.0
         return round(det.get("lip_ratio", 0.0), 3)
-
