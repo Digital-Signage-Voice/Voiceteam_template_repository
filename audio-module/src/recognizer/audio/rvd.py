@@ -213,6 +213,12 @@ class FinalNoiseReducer:
             self._update_profile_if_needed(audio_chunk)
             return audio_chunk * self.cfg.non_speech_gain
 
+        # [추가] 3단계 구현: Confidence가 임계값 미만이면 정밀 처리 건너뜀
+        # 설정된 임계값보다 신뢰도가 낮으면 잡음 제거를 하지 않음
+        if vad_conf < self.cfg.vad_confidence_threshold:
+            # print(f"⚠️ 신뢰도 낮음({vad_conf:.2f} < {self.cfg.vad_confidence_threshold}): 잡음 제거 Skip")
+            return audio_chunk
+
         try:
             # 1. Noise Reduction (Spectral Gating)
             # noisereduce 라이브러리가 무거우면 여기서 try-except로 bypass 하도록 수정

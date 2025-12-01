@@ -4,7 +4,7 @@ from dataclasses import dataclass
 @dataclass
 class Config:
     # ====== 분류 임계값 관련 ======
-    lip_ratio_threshold: float = 0.40   # 입술 비율
+    lip_ratio_threshold: float = 0.23   # [수정] 입술 비율 (0.35 > 0.23)
     open_frames_to_speaking: int = 3    # 입이 연속으로 열린 프레임 수
     
     # ====== 입력 프레임 크기 ======

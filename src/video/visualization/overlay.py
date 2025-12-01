@@ -30,7 +30,6 @@ class Overlay:
         conf = result.get("confidence", 0.0)
         speaking = result.get("is_speaking", False)
         person_detected = result.get("person_detected", False)
-        flags = result.get("flags", {})
 
         text_color = (255, 255, 255)
         line_height = 25
@@ -51,11 +50,6 @@ class Overlay:
         # 사람 탐지 여부
         cv2.putText(frame, f"Person detected: {person_detected}", (10, conf_bar_y + 75),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 255) if person_detected else (100, 100, 100), 1)
-
-        # Flags 정보
-        flag_text = f"Flags: roi={flags.get('roi_detected', False)}, ts={flags.get('timestamp_valid', False)}"
-        cv2.putText(frame, flag_text, (10, conf_bar_y + 100),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (180, 180, 180), 1)
 
         # ---------------------------
         # 3️⃣ 시각적 상태 표시
