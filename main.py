@@ -102,19 +102,14 @@ def stt_worker(model):
         try:
             current_time = time.time()
 
-            # ---------------------------------------------------------
             # [0] 발화 타이머 갱신 (핵심 로직)
-            # ---------------------------------------------------------
-            # 사람이 있고 + 말하는 중이라면 -> 타이머 리셋
             if visual_context["person_detected"] and visual_context["is_speaking"]:
                 last_speech_time = current_time
             
             # 마지막 발화로부터 얼마나 지났는지 계산
             time_since_speech = current_time - last_speech_time
             
-            # ---------------------------------------------------------
-            # [1] 데이터 주입 (VAD & Audio)
-            # ---------------------------------------------------------
+            # [1] 데이터 주입 (Queue -> Reducer)
             while not vad_queue.empty():
                 vad_data = vad_queue.get()
                 if not visual_context["use_visual_gating"]:
@@ -131,66 +126,73 @@ def stt_worker(model):
                 flat_audio = raw_audio.flatten().astype(np.float32)
                 reducer.add_audio_chunk(flat_audio, timestamp)
 
-            # ---------------------------------------------------------
-            # [2] Smart Visual Gating (조건 수정됨)
-            # ---------------------------------------------------------
+            # [2] Visual Gating
             # 차단해야 하는 경우:
             # 1. 사람이 아예 없을 때 (즉시 차단)
             # 2. 사람은 있지만 입을 다문지 1.5초가 지났을 때 (지연 차단)
             
             should_block_stt = False
+            block_reason = ""
             
             if visual_context["use_visual_gating"]:
                 if not visual_context["person_detected"]:
-                    should_block_stt = True # 사람이 없으면 얄짤없음
+                    should_block_stt = True
+                    block_reason = "사람 없음"
                 elif time_since_speech > PAUSE_THRESHOLD:
-                    should_block_stt = True # 입 다물고 1.5초 지남 -> 이제 꺼도 됨
+                    should_block_stt = True
+                    block_reason = f"침묵 {time_since_speech:.1f}초 경과"
 
             if should_block_stt:
-                # 데이터 버리기 (환각 방지)
+                # 데이터 버리기
                 _ = reducer.get_processed_chunk() 
+                
+                # 버퍼가 차있었다면, 지워지기 전에 로그 출력 (아까운 데이터 확인)
+                if len(stt_accum_buffer) > 0:
+                    # print(f"🧹 [Reset] 버퍼 초기화됨 ({block_reason})")
+                    pass
+                    
                 stt_accum_buffer = np.array([], dtype=np.float32)
                 time.sleep(0.05)
                 continue
 
-            # ---------------------------------------------------------
-            # [3] 오디오 회수 및 버퍼링 (사람이 있을 때만 도달)
-            # ---------------------------------------------------------
+            # [3] 오디오 회수
             while True:
                 clean_chunk = reducer.get_processed_chunk()
                 if clean_chunk is None: break
                 stt_accum_buffer = np.concatenate((stt_accum_buffer, clean_chunk))
 
-            # 버퍼 길이 제한 (메모리 보호)
+            # 버퍼 길이 제한
             if len(stt_accum_buffer) > SAMPLE_RATE * 10.0:
                 stt_accum_buffer = stt_accum_buffer[-int(SAMPLE_RATE*5.0):]
 
-            # ---------------------------------------------------------
             # [4] STT 추론
-            # ---------------------------------------------------------
             if len(stt_accum_buffer) >= SAMPLE_RATE * TRANSCRIPTION_INTERVAL:
                 process_len = int(SAMPLE_RATE * TRANSCRIPTION_INTERVAL)
                 chunk_to_transcribe = stt_accum_buffer[:process_len]
                 stt_accum_buffer = stt_accum_buffer[process_len:] 
 
-                # 너무 조용하면 스킵 (RMS Amplitude 체크)
-                # 잡음 제거가 된 상태이므로 0.01보다 작으면 거의 무음임
-                if np.sqrt(np.mean(chunk_to_transcribe**2)) < 0.005:
+                # RMS 기준 대폭 완화 (0.005 -> 0.001)
+                rms = np.sqrt(np.mean(chunk_to_transcribe**2))
+                
+                # 디버깅: RMS 값이 너무 작아서 무시되는지 확인
+                # print(f"📊 [Check] RMS: {rms:.5f}") 
+
+                if rms < 0.001: 
                     continue
 
-                # Whisper 파라미터 강화 (환각 방지 옵션 추가)
+                # Whisper 파라미터
                 segments, info = model.transcribe(
                     chunk_to_transcribe, 
                     vad_filter=True, 
                     language="ko",
-                    temperature=0.0,            # [중요] 창의성 제거
-                    condition_on_previous_text=False, # [중요] "888" 루프 끊기
-                    no_speech_threshold=0.6     # [중요] 말 아님 확률 높으면 무시
+                    temperature=0.0,            # 창의성 제거
+                    condition_on_previous_text=False,
+                    no_speech_threshold=0.6     # 말 아님 확률 높으면 무시
                 )
                 
                 text = " ".join([segment.text for segment in segments]).strip()
                 
-                # "MBC", "시청해주셔서" 등 특정 환각 단어 필터링
+                # 환각 필터링
                 hallucination_filters = ["MBC", "뉴스", "시청해", "감사합니다", "구독", "좋아요"]
                 if any(h in text for h in hallucination_filters) and len(text) < 15:
                     continue
@@ -305,7 +307,7 @@ def run_realtime_pipeline():
             status_msg = f"Speaking (Conf: {result['confidence']:.2f})"
             status_color = (0, 255, 0)   # 초록
         elif result["person_detected"]:
-            status_msg = "😐 Silent"
+            status_msg = "Silent"
             status_color = (200, 200, 200) # 회색
         else:
             status_msg = "Searching..."

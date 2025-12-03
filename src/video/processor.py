@@ -48,6 +48,19 @@ class VideoProcessor:
         # [NEW] 스무딩을 위한 이전 신뢰도 저장 변수
         self.prev_confidence = 0.0
 
+    def check_head_turn(self, det, threshold=0.20):
+        """
+        고개를 돌렸는지 판단
+        """
+        if det is None:
+            return False
+        
+        yaw = det.get('head_yaw', 0.0)
+        # Yaw 절대값이 임계값을 넘으면 회전으로 간주
+        if abs(yaw) > threshold:
+            print(f"[Head Turn] 감지됨 (Yaw: {yaw:.2f})") # 디버깅용
+            return True
+        return False
    
     def process_frame(self, frame_id, frame):
         """단일 프레임 처리 후 결과 dict 반환"""
@@ -99,6 +112,9 @@ class VideoProcessor:
             except Exception as e:
                 pass # Fallback도 실패하면 무시
 
+        # 고개 돌림 확인
+        is_head_turning = self.check_head_turn(det, threshold=0.35)
+
         # 4️⃣ 프레임 차이 계산
         diff_val = frame_difference(self.prev_gray, gray, lip_pts_np)
 
@@ -136,48 +152,44 @@ class VideoProcessor:
         else:
             ratio_for_conf = lip_ratio
 
-        # -------------------------------------------------------------------------
-        # [8️⃣ Confidence Calculation - Improved]
-        # 사용자 요청 반영: Boolean Boost + Smoothing + Sensitivity Up
-        # -------------------------------------------------------------------------
+        # 8️⃣ Confidence 계산
+        # [A] Score Calculation
+        # [수정] 움직임 민감도 하향 (8.0 -> 5.0)
+        score_diff = min(diff_val * 5.0, 1.0)
         
-        # [A] Sensitivity Boost (작은 움직임도 점수화)
-        # diff_val이 0.1(작음) -> 0.8점
-        score_diff = min(diff_val * 8.0, 1.0)
-        
-        # 입이 조금이라도(0.2) 열리면 점수 부여 (기존 0.25 -> 0.2로 완화)
+        # 입이 조금이라도(0.2) 열리면 점수 부여
         score_ratio = 0.0
         if ratio_for_conf > 0.2:
             score_ratio = min((ratio_for_conf - 0.2) * 5.0, 1.0)
 
         # [B] Raw Confidence Calculation
-        # 움직임(Diff)에 더 큰 비중 (70%)
-        raw_conf = (0.7 * score_diff) + (0.3 * score_ratio)
+        # [수정] 가중치 역전: 움직임(0.4) < 입모양(0.6)
+        # 이제 입을 다물고 움직이면(Diff=1.0, Ratio=0.0) -> 0.4점밖에 못 받음 (비발화)
+        raw_conf = (0.4 * score_diff) + (0.6 * score_ratio)
 
-        # [C] Boolean Boost (핵심 로직)
-        # 이미 분류기(Rule/ML)가 "말하고 있음"이라고 판단했다면, 
-        # 입을 잠깐 다무는 순간이어도 높은 점수를 강제 부여.
+        # [C] Boolean Boost
         if speaking:
-            # 최소 0.75점 보장 + 보너스
-            # (예: 계산값이 0.3이어도 -> 0.75로 점프)
+            # 말하고 있으면 기본 점수 보장
             raw_conf = max(raw_conf, 0.65) + 0.1
         
-        # [D] Smoothing (Inertia)
+        # [D] Smoothing
         # 점수가 갑자기 떨어지는 것을 방지 (이전 값 70% 반영)
-        # 비발화로 바뀌더라도 천천히 점수가 내려감 -> Flickering 방지
         combined_confidence = (0.3 * raw_conf) + (0.7 * self.prev_confidence)
 
         # [E] Safety Gating
-        # 사람이 없거나 화질이 너무 나쁘면 강제 0
         if not person_detected or feature_quality < 0.2:
             combined_confidence = 0.0
+
+        # [F] 고개 돌림 감지 시 강제 차단
+        if is_head_turning:
+            combined_confidence = 0.0
+            speaking = False
 
         # 범위 제한 (0.0 ~ 1.0)
         combined_confidence = min(max(combined_confidence, 0.0), 1.0)
         
         # 다음 프레임을 위해 저장
         self.prev_confidence = combined_confidence
-        # -------------------------------------------------------------------------
 
         # 9️⃣ flags
         flags = {
@@ -205,23 +217,34 @@ class VideoProcessor:
         while True:
             ret, frame = self.cap.read()
             if not ret:
+                print("비디오 소스 종료 또는 읽기 실패")
                 break
 
-            result = self.process_frame(frame_id, frame)
-            print(result)
+            try:
+                result = self.process_frame(frame_id, frame)
+                
+                # 결과 출력
+                # print(result)
 
-            if self.visualize:
-                frame_vis = Overlay.draw(frame.copy(), result)
-                
-                # 원본 비율 유지하면서 리사이즈
-                h, w = frame_vis.shape[:2]
-                scale = min(cfg.window_width / w, cfg.window_height / h, 1.0)  # 1.0 이상 확대 금지
-                new_w, new_h = int(w * scale), int(h * scale)
-                frame_vis_resized = cv2.resize(frame_vis, (new_w, new_h))
-                
-                cv2.imshow(cfg.window_name, frame_vis_resized)
-                if cv2.waitKey(1) & 0xFF == ord('q'):
-                    break
+                if self.visualize:
+                    frame_vis = Overlay.draw(frame.copy(), result)
+                    
+                    # 리사이즈 및 출력
+                    h, w = frame_vis.shape[:2]
+                    scale = min(cfg.window_width / w, cfg.window_height / h, 1.0)
+                    new_w, new_h = int(w * scale), int(h * scale)
+                    frame_vis_resized = cv2.resize(frame_vis, (new_w, new_h))
+                    
+                    cv2.imshow(cfg.window_name, frame_vis_resized)
+                    
+                    key = cv2.waitKey(1) & 0xFF
+                    if key == ord('q'):
+                        break
+            
+            except Exception as e:
+                # 에러가 발생해도 죽지 않고 로그만 남기고 계속 실행
+                print(f"{RED}[Error] Frame skipping due to error: {e}{RESET}")
+                continue
 
             frame_id += 1
 
