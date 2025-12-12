@@ -236,7 +236,7 @@ def run_realtime_pipeline():
     # 1. 모델 로드
     print("⏳ Whisper 모델 로딩 중...")
     try:
-        stt_model = WhisperModel("base", device="cpu", compute_type="int8")
+        stt_model = WhisperModel("small", device="cpu", compute_type="int8")
     except Exception as e:
         print(f"❌ Whisper 로딩 실패: {e}")
         return
